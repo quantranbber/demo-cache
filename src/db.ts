@@ -1,74 +1,68 @@
-import mongoose, { ConnectionOptions } from 'mongoose';
+import { Connection, createConnection } from 'typeorm';
+import { ConnectionOptions } from 'typeorm';
+import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
+import { parse, ConnectionOptions as parseOptions } from 'pg-connection-string';
+import * as entities from './entity';
 
-(<any>mongoose).Promise = global.Promise;
-
-interface IOnConnectedCallback {
-  (): void;
+interface CustomOptions extends parseOptions {
+  schema: string;
 }
 
-export default class MongoConnection {
-  private readonly mongoUrl: string;
+require('dotenv').config({ path: './process.env' });
 
-  private onConnectedCallback: IOnConnectedCallback;
+const db = parse(process.env.DB_URL) as CustomOptions;
+export const schema = db.schema || 'public';
+export const connectionOptions: ConnectionOptions = {
+  type: 'postgres',
+  host: db.host,
+  port: Number(db.port),
+  schema: schema,
+  database: db.database,
+  username: db.user,
+  password: db.password,
+  logging: ['query', 'error'],
+  entities: Object.values(entities),
+  namingStrategy: new SnakeNamingStrategy(),
+  extra: {
+    // set pool max size to 1
+    max: 1,
+    // close idle clients after 1 second
+    idleTimeoutMillis: 1000,
+  },
+};
 
-  private isConnectedBefore: boolean = false;
 
-  private readonly mongoConnectionOptions: ConnectionOptions = {
-    useNewUrlParser: true,
-    useCreateIndex: true,
-    useUnifiedTopology: true,
-    useFindAndModify: false
-  };
+export class Database {
+  private static connection: Connection;
 
-  constructor(mongoUrl: string) {
-    this.mongoUrl = mongoUrl;
-    mongoose.connection.on('error', this.onError);
-    mongoose.connection.on('disconnected', this.onDisconnected);
-    mongoose.connection.on('connected', this.onConnected);
-    mongoose.connection.on('reconnected', this.onReconnected);
+  static async getConnection(): Promise<Connection> {
+    if (!this.connection || !this.connection.isConnected) {
+      console.info('Start connect database');
+      this.connection = await Database.getDBConnect();
+      console.info('Connected to database');
+    }
+
+    return this.connection;
   }
 
-  public close(onClosed: (err: any) => void) {
-    console.log('Closing the MongoDB connection');
-    mongoose.connection.close(onClosed);
-  }
-
-  public connect(onConnectedCallback: IOnConnectedCallback) {
-    this.onConnectedCallback = onConnectedCallback;
-    this.startConnection();
-  }
-
-  public startConnection = () => {
-    console.log('Connecting to MongoDB');
+  static async getDBConnect({
+                              retries = 1,
+                              maxRetries = 3,
+                            }: {
+    retries?: number;
+    maxRetries?: number;
+  } = {}): Promise<Connection> {
     try {
-      mongoose.connect(this.mongoUrl, this.mongoConnectionOptions).catch(() => { });
-    } catch (err) {
-      console.log(err);
+      return await createConnection(connectionOptions);
+    } catch (error) {
+      if (retries < maxRetries) {
+        console.info('ERROR DB connection:', error);
+        console.info('Retry DB connection times:', retries++);
+        return Database.getDBConnect({ retries, maxRetries });
+      }
+
+      console.error('UNHANDLED ERROR DB connection after 3 times');
+      throw error;
     }
   }
-
-  private onConnected = () => {
-    console.log('[SUCCESS] Connected to MongoDB success');
-    this.isConnectedBefore = true;
-    this.onConnectedCallback();
-  };
-
-  private onReconnected = () => {
-    console.log('Reconnected to MongoDB');
-    this.onConnectedCallback();
-  };
-
-  private onError = () => {
-    console.log('Could not connect to mongo');
-    process.exit(1);
-  };
-
-  private onDisconnected = () => {
-    if (!this.isConnectedBefore) {
-      setTimeout(() => {
-        this.startConnection();
-      }, 2000);
-      console.log('Retrying mongo connection');
-    }
-  };
 }
